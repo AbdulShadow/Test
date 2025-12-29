@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Neon Subway: Velocity Run</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', Courier, monospace; }
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; display: flex; flex-direction: column; justify-content: space-between;
+        }
+        #score-board {
+            padding: 20px; color: #0ff; font-size: 24px; text-shadow: 0 0 10px #0ff;
+            font-weight: bold;
+        }
+        #game-over {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            text-align: center; display: none; pointer-events: auto;
+        }
+        h1 { color: #ff0055; font-size: 60px; text-transform: uppercase; margin: 0; text-shadow: 0 0 20px #ff0055; }
+        p { color: #fff; font-size: 20px; }
+        button {
+            background: #0ff; border: none; padding: 15px 40px; font-size: 20px;
+            cursor: pointer; font-weight: bold; text-transform: uppercase;
+            box-shadow: 0 0 15px #0ff; transition: 0.2s;
+        }
+        button:hover { background: #fff; box-shadow: 0 0 25px #fff; }
+        .controls { position: absolute; bottom: 20px; left: 20px; color: #888; font-size: 12px; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="score-board">SCORE: <span id="score">0</span> | SPEED: <span id="speed-display">1.0x</span></div>
+        <div class="controls">ARROWS / WASD to Move & Jump</div>
+        <div id="game-over">
+            <h1>CRASHED</h1>
+            <p>Final Score: <span id="final-score">0</span></p>
+            <button onclick="resetGame()">Reboot System</button>
+        </div>
+    </div>
+
+<script>
+    // --- CONFIGURATION ---
+    const COLORS = {
+        sky: 0x100020,
+        ground: 0x1a1a1a,
+        grid: 0xff00cc,
+        player: 0x00ffff,
+        obstacle: 0xff3333,
+        train: 0xffaa00,
+        coin: 0xffd700
+    };
+
+    const LANE_WIDTH = 3.5;
+    const GRAVITY = 0.015;
+    const JUMP_FORCE = 0.35;
+    
+    // --- STATE ---
+    let scene, camera, renderer;
+    let player, playerMesh;
+    let obstacles = [];
+    let particles = [];
+    let gameActive = true;
+    let score = 0;
+    let gameSpeed = 0.5; // Base speed
+    let distanceTraveled = 0;
+
+    // Player State
+    let currentLane = 0; // -1 (Left), 0 (Center), 1 (Right)
+    let targetX = 0;
+    let verticalVelocity = 0;
+    let isJumping = false;
+
+    init();
+    animate();
+
+    function init() {
+        // 1. Setup Scene (Layer 2 & 8)
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(COLORS.sky);
+        scene.fog = new THREE.FogExp2(COLORS.sky, 0.02); // Distance fog
+
+        // 2. Camera (Layer 7)
+        camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 4, 8);
+        camera.lookAt(0, 0, -5);
+
+        // 3. Renderer
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // 4. Lighting (Layer 2)
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(10, 20, 10);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+        
+        // Dynamic "City" Light (Neon glow)
+        const pointLight = new THREE.PointLight(COLORS.grid, 1, 50);
+        pointLight.position.set(0, 5, 0);
+        scene.add(pointLight);
+
+        // 5. Environment (The Floor)
+        const gridHelper = new THREE.GridHelper(200, 100, COLORS.grid, 0x222222);
+        gridHelper.position.y = -1; // Lower grid
+        gridHelper.position.z = -50;
+        gridHelper.scale.z = 5; // Stretch to look like tracks
+        scene.add(gridHelper);
+        
+        // Infinite Floor Illusion plane
+        const planeGeo = new THREE.PlaneGeometry(100, 500);
+        const planeMat = new THREE.MeshStandardMaterial({ color: COLORS.ground, roughness: 0.1, metalness: 0.5 });
+        const floor = new THREE.Mesh(planeGeo, planeMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = -1.01;
+        floor.position.z = -100;
+        scene.add(floor);
+
+        // 6. Player (Layer 3 & 8)
+        const geometry = new THREE.BoxGeometry(1, 2, 1);
+        const material = new THREE.MeshStandardMaterial({ 
+            color: COLORS.player, 
+            emissive: COLORS.player, 
+            emissiveIntensity: 0.5 
+        });
+        player = new THREE.Group();
+        playerMesh = new THREE.Mesh(geometry, material);
+        playerMesh.castShadow = true;
+        
+        // Add a "Trail" or Engine glow
+        const glowGeo = new THREE.BoxGeometry(0.5, 1.5, 0.5);
+        const glowMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 });
+        const glow = new THREE.Mesh(glowGeo, glowMat);
+        glow.position.z = 0.5;
+        playerMesh.add(glow);
+
+        player.add(playerMesh);
+        scene.add(player);
+
+        // Input Listeners
+        window.addEventListener('keydown', handleInput);
+        window.addEventListener('resize', onWindowResize);
+    }
+
+    function handleInput(e) {
+        if (!gameActive) return;
+
+        if (e.key === 'ArrowLeft' || e.key === 'a') {
+            if (currentLane > -1) currentLane--;
+        }
+        if (e.key === 'ArrowRight' || e.key === 'd') {
+            if (currentLane < 1) currentLane++;
+        }
+        if ((e.key === 'ArrowUp' || e.key === 'w' || e.key === ' ') && !isJumping) {
+            verticalVelocity = JUMP_FORCE;
+            isJumping = true;
+        }
+        if (e.key === 'ArrowDown' || e.key === 's') {
+            if (isJumping) verticalVelocity = -0.4; // Fast fall
+        }
+    }
+
+    function spawnObstacle() {
+        // Layer 4: Obstacles & Hazards
+        const type = Math.random();
+        const lane = Math.floor(Math.random() * 3) - 1; // -1, 0, 1
+        const xPos = lane * LANE_WIDTH;
+        const zPos = player.position.z - 80; // Spawn far ahead
+
+        let mesh;
+
+        if (type > 0.7) {
+            // TRAIN (Tall, Long, Fast)
+            const geo = new THREE.BoxGeometry(2.5, 3.5, 10);
+            const mat = new THREE.MeshStandardMaterial({ color: COLORS.train });
+            mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(xPos, 0.75, zPos);
+            mesh.userData = { type: 'train', speedOffset: 0.2 }; // Trains move towards player faster
+        } else if (type > 0.3) {
+            // BARRIER (Low, Jumpable)
+            const geo = new THREE.BoxGeometry(2.5, 1, 0.5);
+            const mat = new THREE.MeshStandardMaterial({ color: COLORS.obstacle });
+            mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(xPos, -0.5, zPos);
+            mesh.userData = { type: 'barrier', speedOffset: 0 };
+        } else {
+             // HIGH OBSTACLE (Slide under - visual only for now as no slide animation)
+             // We'll treat this as a standard block for this prototype
+             const geo = new THREE.BoxGeometry(2.5, 2.5, 2.5);
+             const mat = new THREE.MeshStandardMaterial({ color: COLORS.obstacle });
+             mesh = new THREE.Mesh(geo, mat);
+             mesh.position.set(xPos, 0.25, zPos);
+             mesh.userData = { type: 'block', speedOffset: 0 };
+        }
+        
+        scene.add(mesh);
+        obstacles.push(mesh);
+    }
+    
+    function addSpeedLines() {
+        // Layer 8: Visuals (Motion Blur effect)
+        const geometry = new THREE.BufferGeometry();
+        const vertices = [];
+        for(let i=0; i<5; i++) {
+            const x = (Math.random() - 0.5) * 30;
+            const y = (Math.random() - 0.5) * 10 + 5;
+            const z = player.position.z - 40 - Math.random() * 20;
+            vertices.push(x, y, z);
+        }
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+        const material = new THREE.PointsMaterial({ color: 0xffffff, size: 0.2, transparent: true, opacity: 0.6 });
+        const particlesMesh = new THREE.Points(geometry, material);
+        scene.add(particlesMesh);
+        particles.push(particlesMesh);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        if (!gameActive) return;
+
+        // --- GAME LOOP ---
+
+        // 1. Difficulty Scaling (Layer 6)
+        gameSpeed += 0.0001; 
+        distanceTraveled += gameSpeed;
+        score = Math.floor(distanceTraveled * 10);
+        
+        // Update UI
+        document.getElementById('score').innerText = score;
+        document.getElementById('speed-display').innerText = (gameSpeed * 2).toFixed(1) + "x";
+
+        // 2. Player Movement (Layer 3)
+        // Horizontal Lerp (Smooth lane switching)
+        targetX = currentLane * LANE_WIDTH;
+        player.position.x += (targetX - player.position.x) * 0.2;
+
+        // Vertical Physics (Jump)
+        player.position.y += verticalVelocity;
+        verticalVelocity -= GRAVITY;
+
+        // Ground Check
+        if (player.position.y <= 0) {
+            player.position.y = 0;
+            verticalVelocity = 0;
+            isJumping = false;
+        }
+
+        // 3. Environment Movement (Layer 1 & 2)
+        // In this prototype, we move obstacles towards player to prevent float precision errors
+        // But visually, the player bounces. Let's create the illusion.
+        
+        // Manage Obstacles
+        if (Math.random() < 0.03 + (gameSpeed * 0.01)) { // Spawn rate increases with speed
+            spawnObstacle();
+        }
+
+        // Move Obstacles
+        for (let i = obstacles.length - 1; i >= 0; i--) {
+            let ob = obstacles[i];
+            
+            // Move object towards player (+Z direction relative to negative spawn)
+            ob.position.z += gameSpeed + (ob.userData.speedOffset || 0);
+
+            // Collision Detection (Layer 4)
+            // AABB Collision (Axis-Aligned Bounding Box)
+            const pBox = new THREE.Box3().setFromObject(playerMesh);
+            const oBox = new THREE.Box3().setFromObject(ob);
+
+            if (pBox.intersectsBox(oBox)) {
+                // Shrink hitbox slightly to be forgiving
+                const collisionMargin = 0.2;
+                if (Math.abs(player.position.x - ob.position.x) < 2.0 && 
+                    Math.abs(player.position.z - ob.position.z) < 1.5 &&
+                    Math.abs(player.position.y - ob.position.y) < 1.5
+                   ) {
+                    gameOver();
+                }
+            }
+
+            // Cleanup
+            if (ob.position.z > 10) {
+                scene.remove(ob);
+                obstacles.splice(i, 1);
+            }
+        }
+
+        // Speed Lines Effect
+        addSpeedLines();
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.position.z += gameSpeed * 2;
+            if(p.position.z > 5) {
+                scene.remove(p);
+                particles.splice(i, 1);
+            }
+        }
+
+        // Camera Follow (Layer 7)
+        // Add dynamic shake based on speed
+        const shake = (Math.random() - 0.5) * (gameSpeed * 0.1);
+        camera.position.x = (player.position.x * 0.3) + shake;
+        camera.position.y = 4 + Math.abs(shake);
+        
+        // Procedural Animation (Layer 8)
+        // Tilt player when moving lanes
+        playerMesh.rotation.z = (player.position.x - targetX) * -0.1;
+        playerMesh.rotation.x += gameSpeed * 0.2; // Rolling effect
+
+        renderer.render(scene, camera);
+    }
+
+    function gameOver() {
+        gameActive = false;
+        document.getElementById('game-over').style.display = 'block';
+        document.getElementById('final-score').innerText = score;
+    }
+
+    function resetGame() {
+        // Reset Variables
+        gameActive = true;
+        score = 0;
+        distanceTraveled = 0;
+        gameSpeed = 0.5;
+        currentLane = 0;
+        player.position.set(0,0,0);
+        
+        // Clear Scene Obstacles
+        obstacles.forEach(ob => scene.remove(ob));
+        obstacles = [];
+        
+        document.getElementById('game-over').style.display = 'none';
+        animate();
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+</script>
+</body>
+</html>
